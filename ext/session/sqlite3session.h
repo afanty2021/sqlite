@@ -16,16 +16,104 @@ extern "C" {
 **
 ** An instance of this object is a [session] that can be used to
 ** record changes to a database.
+**
+** 会话对象句柄
+**
+** 此对象的一个实例是会话，可用于记录数据库的变更。
+**
+** Session 扩展架构概述：
+**
+** 1. 会话机制：
+**    - 捕获数据库的所有变更操作（INSERT、UPDATE、DELETE）
+**    - 基于预更新钩子 (pre-update hook) 实现
+**    - 支持增量变更跟踪和批量变更记录
+**    - 提供变更过滤和选择性跟踪功能
+**
+** 2. 变更集生成：
+**    - 将捕获的变更序列化为二进制格式
+**    - 支持完整变更集和补丁集两种格式
+**    - 压缩存储格式，减少网络传输开销
+**    - 包含完整的元数据和冲突检测信息
+**
+** 3. 数据同步：
+**    - 支持将变更应用到目标数据库
+**    - 自动处理主键冲突和数据一致性
+**    - 提供冲突检测和解决策略
+**    - 支持双向和增量同步
+**
+** 4. 应用场景：
+**    - 移动设备与服务器数据同步
+**    - 分布式数据库系统的数据复制
+**    - 离线编辑和批量更新
+**    - 数据审计和变更追踪
+**    - 数据备份和恢复系统
+**
+** 使用流程：
+** 1. 创建会话：sqlite3_session_create()
+** 2. 附加表：sqlite3session_attach()
+** 3. 执行数据库操作
+** 4. 生成变更集：sqlite3session_changeset()
+** 5. 应用到目标：sqlite3changeset_apply()
+**
+** 设计特点：
+** - 高效的变更捕获机制
+** - 最小的性能开销
+** - 完整的事务语义支持
+** - 灵活的配置选项
 */
-typedef struct sqlite3_session sqlite3_session;
+typedef struct sqlite3_session sqlite3_session;     /* 会话对象句柄 */
 
 /*
 ** CAPI3REF: Changeset Iterator Handle
 **
 ** An instance of this object acts as a cursor for iterating
 ** over the elements of a [changeset] or [patchset].
+**
+** 变更集迭代器句柄
+**
+** 此对象的一个实例充当迭代器，用于遍历变更集或补丁集的元素。
+**
+** 变更集迭代器功能：
+**
+** 1. 变更遍历：
+**    - 按时间顺序遍历所有数据库变更
+**    - 支持按表名、操作类型过滤变更
+**    - 提供前向和双向遍历能力
+**    - 允许跳过特定类型的变更
+**
+** 2. 变更信息访问：
+**    - 获取变更的类型（INSERT、UPDATE、DELETE）
+**    - 读取变更前后的数据值
+**    - 访问主键和冲突信息
+**    - 提供变更的上下文信息
+**
+** 3. 冲突处理：
+**    - 识别和报告数据冲突
+**    - 提供冲突解决策略选项
+**    - 支持自定义冲突处理器
+**    - 记录冲突解决的详细过程
+**
+** 4. 性能优化：
+**    - 延迟加载大型变更集
+**    - 内存友好的流式处理
+**    - 支持并行变更处理
+**    - 优化的索引和查找机制
+**
+** 使用示例：
+** ```c
+** sqlite3_changeset_iter *pIter;
+** int rc = sqlite3changeset_start(&pIter, nChangeset, pChangeset);
+**
+** while( SQLITE_ROW == sqlite3changeset_next(pIter) ){
+**   const char *zTab;
+**   int nCol;
+**   int op;
+**   sqlite3changeset_op(pIter, &zTab, &nCol, &op, 0, 0);
+**   // 处理变更...
+** }
+** ```
 */
-typedef struct sqlite3_changeset_iter sqlite3_changeset_iter;
+typedef struct sqlite3_changeset_iter sqlite3_changeset_iter;  /* 变更集迭代器句柄 */
 
 /*
 ** CAPI3REF: Create A New Session Object

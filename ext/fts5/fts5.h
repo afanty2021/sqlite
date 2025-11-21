@@ -10,11 +10,47 @@
 **
 ******************************************************************************
 **
-** Interfaces to extend FTS5. Using the interfaces defined in this file, 
+** Interfaces to extend FTS5. Using the interfaces defined in this file,
 ** FTS5 may be extended with:
 **
 **     * custom tokenizers, and
 **     * custom auxiliary functions.
+**
+** FTS5 扩展接口定义
+**
+** 使用本文件中定义的接口，可以扩展 FTS5 功能，包括：
+**
+**     * 自定义分词器 (custom tokenizers)，和
+**     * 自定义辅助函数 (custom auxiliary functions)。
+**
+** FTS5 扩展架构概述：
+**
+** 1. 分词器扩展 (Tokenizer Extensions)：
+**    - 自定义文本分词逻辑，支持不同语言的特殊需求
+**    - 实现特殊的索引策略，如 n-gram、词干提取、同义词处理
+**    - 支持停用词过滤、大小写转换、特殊符号处理
+**
+** 2. 辅助函数扩展 (Auxiliary Functions)：
+**    - 在 FTS5 查询中调用的自定义函数
+**    - 可以访问文档内容、查询结果和索引统计信息
+**    - 支持相关性计算、结果高亮、文档摘要等高级功能
+**
+** 3. 扩展生命周期管理：
+**    - 运行时动态加载和卸载扩展
+**    - 线程安全的扩展调用机制
+**    - 内存管理和错误处理
+**
+** 主要应用场景：
+** - 多语言全文搜索：中文分词、日语分词、阿拉伯语处理
+** - 专业领域搜索：法律文档、医疗记录、技术文档
+** - 高级文本分析：情感分析、主题分类、实体识别
+** - 搜索结果优化：智能排序、相关性提升、结果聚合
+**
+** 扩展接口设计原则：
+** - 高性能：扩展函数在搜索关键路径上，需高效执行
+** - 灵活性：支持复杂的业务逻辑和自定义算法
+** - 兼容性：与标准 SQL 查询语法无缝集成
+** - 可维护性：清晰的接口定义和错误处理机制
 */
 
 
@@ -32,23 +68,124 @@ extern "C" {
 **
 ** Virtual table implementations may overload SQL functions by implementing
 ** the sqlite3_module.xFindFunction() method.
+**
+** 自定义辅助函数
+**
+** 虚拟表实现可以通过实现 sqlite3_module.xFindFunction() 方法来重载 SQL 函数。
+**
+** FTS5 辅助函数架构：
+**
+** 1. 函数注册和调用机制：
+**    - 扩展函数在查询编译阶段被识别和注册
+**    - 运行时通过虚拟表接口调用扩展函数
+**    - 支持函数重载和参数类型检查
+**
+** 2. 函数执行环境：
+**    - 提供访问 FTS5 内部状态的 API
+**    - 安全的内存管理和错误处理
+**    - 支持多线程并发执行
+**
+** 3. 数据访问权限：
+**    - 读取文档内容和索引信息
+**    - 访问查询结果和统计信息
+**    - 修改搜索结果和排序
+**
+** 4. 典型应用场景：
+**    - 结果高亮：标记匹配的文本片段
+**    - 摘要生成：提取包含关键词的文本段落
+**    - 相关性计算：实现自定义的排序算法
+**    - 结果过滤：基于复杂条件过滤搜索结果
 */
 
-typedef struct Fts5ExtensionApi Fts5ExtensionApi;
-typedef struct Fts5Context Fts5Context;
-typedef struct Fts5PhraseIter Fts5PhraseIter;
+/* FTS5 扩展 API 结构体 - 前向声明 */
+typedef struct Fts5ExtensionApi Fts5ExtensionApi;  /* FTS5 扩展 API 结构体 */
+typedef struct Fts5Context Fts5Context;            /* FTS5 上下文结构体 */
+typedef struct Fts5PhraseIter Fts5PhraseIter;      /* FTS5 短语迭代器结构体 */
 
+/* FTS5 扩展函数类型定义
+**
+** 所有 FTS5 自定义辅助函数必须符合此函数签名。
+**
+** 参数说明：
+**
+** pApi: 当前 FTS 版本提供的 API 指针
+**      - 包含所有可调用的 FTS5 扩展 API 函数
+**      - 版本化接口确保向后兼容性
+**      - 提供数据访问、状态查询等核心功能
+**
+** pFts: 传递给 pApi 函数的第一个参数
+**      - FTS5 查询上下文，包含当前查询状态
+**      - 用于访问文档内容、索引信息和搜索结果
+**      - 维护查询执行的内部状态
+**
+** pCtx: 用于返回结果或错误的 SQLite 上下文
+**      - SQLite 标准的函数调用上下文
+**      - 用于设置返回值、报告错误、管理内存
+**      - 支持各种数据类型的返回值
+**
+** nVal: apVal[] 数组中的值数量
+**      - 扩展函数的参数个数
+**      - 用于参数验证和类型检查
+**      - 支持可变参数函数
+**
+** apVal: 扩展函数的参数数组
+**       - SQLite 值对象数组，包含所有参数
+**       - 支持各种 SQLite 数据类型
+**       - 提供类型安全的参数访问
+**
+** 返回值：无，通过 pCtx 设置结果或错误
+**
+** 使用示例：
+** ```c
+** static void my_highlight_function(
+**   const Fts5ExtensionApi *pApi,
+**   Fts5Context *pFts,
+**   sqlite3_context *pCtx,
+**   int nVal,
+**   sqlite3_value **apVal
+** ){
+**   // 实现搜索结果高亮逻辑
+**   // ...
+** }
+** ```
+*/
 typedef void (*fts5_extension_function)(
-  const Fts5ExtensionApi *pApi,   /* API offered by current FTS version */
-  Fts5Context *pFts,              /* First arg to pass to pApi functions */
-  sqlite3_context *pCtx,          /* Context for returning result/error */
-  int nVal,                       /* Number of values in apVal[] array */
-  sqlite3_value **apVal           /* Array of trailing arguments */
+  const Fts5ExtensionApi *pApi,   /* API offered by current FTS version - 当前 FTS 版本提供的 API */
+  Fts5Context *pFts,              /* First arg to pass to pApi functions - 传递给 pApi 函数的第一个参数 */
+  sqlite3_context *pCtx,          /* Context for returning result/error - 返回结果/错误的上下文 */
+  int nVal,                       /* Number of values in apVal[] array - apVal[] 数组中的值数量 */
+  sqlite3_value **apVal           /* Array of trailing arguments - 扩展函数的参数数组 */
 );
 
+/* FTS5 短语迭代器结构体
+**
+** 用于遍历 FTS5 查询中匹配的短语实例。
+**
+** 字段说明：
+**
+** a: 短语在文档中的起始位置指针
+**    - 指向包含起始位置信息的缓冲区
+**    - 位置以字节偏移量表示
+**    - 用于精确定位匹配的文本片段
+**
+** b: 短语在文档中的结束位置指针
+**    - 指向包含结束位置信息的缓冲区
+**    - 用于确定匹配短语的边界
+**    - 支持高亮显示和摘要提取
+**
+** 使用方式：
+** - 通过 FTS5 API 获取短语迭代器
+** - 使用迭代器遍历所有匹配的短语
+** - 提取位置信息用于结果处理
+**
+** 应用场景：
+** - 搜索结果高亮：标记匹配的文本
+** - 摘要生成：提取相关文本片段
+** - 位置分析：统计匹配词的分布
+*/
 struct Fts5PhraseIter {
-  const unsigned char *a;
-  const unsigned char *b;
+  const unsigned char *a;        /* 短语起始位置指针 - 指向短语开始位置的数据 */
+  const unsigned char *b;        /* 短语结束位置指针 - 指向短语结束位置的数据 */
 };
 
 /*

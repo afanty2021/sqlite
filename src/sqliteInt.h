@@ -11,40 +11,71 @@
 *************************************************************************
 ** Internal interface definitions for SQLite.
 **
+** SQLite 内部接口定义头文件
+**
+** 本文件定义了 SQLite 数据库引擎的所有内部数据结构、常量、宏定义和函数原型。
+** 这是 SQLite 核心的"中央神经系统"，包含了连接管理、虚拟机执行、
+** B-Tree 存储、页面缓存、事务管理等所有核心模块的内部接口。
+**
+** 主要包含内容：
+** 1. 编译器兼容性和平台适配宏定义
+** 2. 核心数据结构定义（sqlite3、Vdbe、BtCursor等）
+** 3. 内存管理和错误处理机制
+** 4. 内部函数接口声明
+** 5. 调试和测试相关宏定义
+**
+** 设计原则：
+** - 内部接口与公共 API 分离，保证 ABI 稳定性
+** - 模块化设计，各组件通过定义良好的接口通信
+** - 跨平台兼容，支持多种操作系统和编译器
+** - 性能优化，通过宏和内联函数减少开销
+**
+** 使用说明：
+** - 本文件仅供 SQLite 内部使用，不应被应用程序直接包含
+** - 修改本文件可能影响 SQLite 的二进制兼容性
+** - 开发者应充分理解 SQLite 架构后再修改内部接口
 */
 #ifndef SQLITEINT_H
 #define SQLITEINT_H
 
 /* Special Comments:
 **
+** 特殊注释说明 - 这些注释对测试覆盖率工具有特殊含义
+**
 ** Some comments have special meaning to the tools that measure test
 ** coverage:
 **
-**    NO_TEST                     - The branches on this line are not
-**                                  measured by branch coverage.  This is
-**                                  used on lines of code that actually
-**                                  implement parts of coverage testing.
+**    NO_TEST                     - 该行分支不被分支覆盖率测量。这通常用于
+**                                  实际实现覆盖率测试功能的代码行。
+**                                  (该行分支不参与测试覆盖率统计)
 **
-**    OPTIMIZATION-IF-TRUE        - This branch is allowed to always be false
-**                                  and the correct answer is still obtained,
-**                                  though perhaps more slowly.
+**    OPTIMIZATION-IF-TRUE        - 该分支允许永远为 false，仍能获得正确结果，
+**                                  但可能执行较慢。
+**                                  (优化分支：允许此条件永远为假)
 **
-**    OPTIMIZATION-IF-FALSE       - This branch is allowed to always be true
-**                                  and the correct answer is still obtained,
-**                                  though perhaps more slowly.
+**    OPTIMIZATION-IF-FALSE       - 该分支允许永远为 true，仍能获得正确结果，
+**                                  但可能执行较慢。
+**                                  (优化分支：允许此条件永远为真)
 **
-**    PREVENTS-HARMLESS-OVERREAD  - This branch prevents a buffer overread
-**                                  that would be harmless and undetectable
-**                                  if it did occur.
+**    PREVENTS-HARMLESS-OVERREAD  - 该分支防止缓冲区溢出，即使发生也是无害且
+**                                  无法检测的。
+**                                  (防止无害的缓冲区溢读)
 **
 ** In all cases, the special comment must be enclosed in the usual
 ** slash-asterisk...asterisk-slash comment marks, with no spaces between the
 ** asterisks and the comment text.
+** (在所有情况下，特殊注释必须用标准的斜杠-星号...星号-斜杠注释标记包围，
+**  星号和注释文本之间不能有空格)
 */
 
 /*
 ** Make sure the Tcl calling convention macro is defined.  This macro is
 ** only used by test code and Tcl integration code.
+**
+** 确保 Tcl 调用约定宏已定义。此宏仅用于测试代码和 Tcl 集成代码。
+**
+** SQLITE_TCLAPI: 定义 Tcl 扩展函数的调用约定，确保跨平台兼容性。
+** 在 Windows 平台上可能需要特殊的调用约定来正确处理 Tcl 接口。
 */
 #ifndef SQLITE_TCLAPI
 #  define SQLITE_TCLAPI
@@ -55,11 +86,29 @@
 ** This should be done first so that it can successfully prevent spurious
 ** compiler warnings due to subsequent content in this file and other files
 ** that are included by this file.
+**
+** 包含用于自定义 MSVC 编译器选项的头文件。
+**
+** 此文件必须在最前面包含，以便成功防止由于本文件及被本文件包含的其他文件中
+** 的后续内容导致的虚假编译器警告。
+**
+** msvc.h: 针对 Microsoft Visual C++ 编译器的特殊配置，包括：
+** - 警告级别设置
+** - 不安全函数的映射（如 strcpy -> strcpy_s）
+** - Windows 特定的定义和宏
 */
 #include "msvc.h"
 
 /*
 ** Special setup for VxWorks
+**
+** VxWorks 操作系统的特殊设置
+**
+** vxworks.h: 针对 VxWorks 实时操作系统的配置，包括：
+** - VxWorks 特定的系统调用和头文件
+** - 任务管理和同步原语
+** - 网络和文件系统接口适配
+** - 内存管理相关的定义
 */
 #include "vxworks.h"
 
@@ -68,24 +117,34 @@
 ** underlying operating system supports it.  If the OS lacks
 ** large file support, or if the OS is windows, these should be no-ops.
 **
-** Ticket #2739:  The _LARGEFILE_SOURCE macro must appear before any
-** system #includes.  Hence, this block of code must be the very first
-** code in all source files.
+** 大文件支持 (Large File Support, LFS) 配置
 **
-** Large file support can be disabled using the -DSQLITE_DISABLE_LFS switch
-** on the compiler command line.  This is necessary if you are compiling
-** on a recent machine (ex: Red Hat 7.2) but you want your code to work
-** on an older machine (ex: Red Hat 6.0).  If you compile on Red Hat 7.2
-** without this option, LFS is enable.  But LFS does not exist in the kernel
-** in Red Hat 6.0, so the code won't work.  Hence, for maximum binary
-** portability you should omit LFS.
+** 如果底层操作系统支持，这些宏定义应该在 POSIX 系统上启用 >2GB 文件支持。
+** 如果操作系统缺乏大文件支持，或者是 Windows 系统，这些定义应该是空操作。
 **
-** The previous paragraph was written in 2005.  (This paragraph is written
-** on 2008-11-28.) These days, all Linux kernels support large files, so
-** you should probably leave LFS enabled.  But some embedded platforms might
-** lack LFS in which case the SQLITE_DISABLE_LFS macro might still be useful.
+** 关键技术说明：
 **
-** Similar is true for Mac OS X.  LFS is only supported on Mac OS X 9 and later.
+** Ticket #2739: _LARGEFILE_SOURCE 宏必须出现在任何系统 #include 之前。
+** 因此，这段代码必须是所有源文件中的第一段代码。
+**
+** 大文件支持可以通过编译器命令行中的 -DSQLITE_DISABLE_LFS 开关禁用。
+** 如果在新机器上编译但希望代码在旧机器上运行，这是必要的：
+** - 例如：在 Red Hat 7.2 上编译，但要在 Red Hat 6.0 上运行
+** - 如果不使用此选项，LFS 被启用；但 Red Hat 6.0 内核不支持 LFS，代码将无法工作
+** - 为了最大二进制兼容性，应该禁用 LFS
+**
+** 历史说明：
+** - 上一段写于 2005 年（本段写于 2008-11-28）
+** - 现代内核都支持大文件，建议保持 LFS 启用
+** - 但某些嵌入式平台可能缺乏 LFS，此时 SQLITE_DISABLE_LFS 宏仍有用
+**
+** Mac OS X 注意事项：
+** - LFS 仅在 Mac OS X 9 及更高版本上受支持
+**
+** 使用的宏定义：
+** - _LARGE_FILE: 启用大文件支持
+** - _FILE_OFFSET_BITS=64: 设置文件偏移量为 64 位
+** - _LARGEFILE_SOURCE: 启用大文件源码兼容性
 */
 #ifndef SQLITE_DISABLE_LFS
 # define _LARGE_FILE       1
@@ -107,6 +166,23 @@
 ** gcc version numbers and have reasonable settings for gcc version numbers,
 ** so the GCC_VERSION macro will be set to a correct non-zero value even
 ** when compiling with clang.
+**
+** 编译器版本检测和优化宏定义
+**
+** GCC_VERSION 和 MSVC_VERSION 宏用于条件性地包含各编译器的优化。
+** 值为 0 表示未使用该编译器。
+**
+** SQLITE_DISABLE_INTRINSIC 宏：禁用所有编译器特定优化，将所有编译器宏设为 0
+**
+** 编译器版本计算：
+**
+** 关于 Clang 的说明：
+** - 曾经有 CLANG_VERSION 宏，但 Clang 版本号仅用于"营销"，不一致且不可靠
+** - 幸运的是，所有 Clang 版本都能识别 gcc 版本号并有合理的设置
+** - 因此即使使用 Clang 编译，GCC_VERSION 宏也会设置为正确的非零值
+**
+** GCC 版本计算公式：主版本 * 1000000 + 次版本 * 1000 + 补丁版本
+** 例如：GCC 4.9.3 = 4*1000000 + 9*1000 + 3 = 4009003
 */
 #if defined(__GNUC__) && !defined(SQLITE_DISABLE_INTRINSIC)
 # define GCC_VERSION (__GNUC__*1000000+__GNUC_MINOR__*1000+__GNUC_PATCHLEVEL__)
@@ -1658,39 +1734,51 @@ typedef int (*sqlite3_xauth)(void*,int,const char*,const char*,const char*,
 
 /*
 ** Each database connection is an instance of the following structure.
+**
+** SQLite 数据库连接结构体 - 每个 SQLite 数据库连接都是此结构体的实例
+**
+** 这是 SQLite 的核心数据结构，包含了数据库连接的所有状态信息、配置参数
+** 和运行时数据。每个 sqlite3 指针代表一个独立的数据库连接实例。
+**
+** 主要功能模块：
+** - 连接管理：VFS 接口、互斥锁、错误状态
+** - SQL 执行：虚拟机列表、语句缓存
+** - 存储管理：数据库后端、页面缓存、事务控制
+** - 配置参数：编译指令设置、限制值、优化选项
+** - 扩展接口：函数注册、模块加载、回调机制
 */
 struct sqlite3 {
-  sqlite3_vfs *pVfs;            /* OS Interface */
-  struct Vdbe *pVdbe;           /* List of active virtual machines */
-  CollSeq *pDfltColl;           /* BINARY collseq for the database encoding */
-  sqlite3_mutex *mutex;         /* Connection mutex */
-  Db *aDb;                      /* All backends */
-  int nDb;                      /* Number of backends currently in use */
-  u32 mDbFlags;                 /* flags recording internal state */
-  u64 flags;                    /* flags settable by pragmas. See below */
-  i64 lastRowid;                /* ROWID of most recent insert (see above) */
-  i64 szMmap;                   /* Default mmap_size setting */
-  u32 nSchemaLock;              /* Do not reset the schema when non-zero */
-  unsigned int openFlags;       /* Flags passed to sqlite3_vfs.xOpen() */
-  int errCode;                  /* Most recent error code (SQLITE_*) */
-  int errByteOffset;            /* Byte offset of error in SQL statement */
-  int errMask;                  /* & result codes with this before returning */
-  int iSysErrno;                /* Errno value from last system error */
-  u32 dbOptFlags;               /* Flags to enable/disable optimizations */
-  u8 enc;                       /* Text encoding */
-  u8 autoCommit;                /* The auto-commit flag. */
-  u8 temp_store;                /* 1: file 2: memory 0: default */
-  u8 mallocFailed;              /* True if we have seen a malloc failure */
-  u8 bBenignMalloc;             /* Do not require OOMs if true */
-  u8 dfltLockMode;              /* Default locking-mode for attached dbs */
-  signed char nextAutovac;      /* Autovac setting after VACUUM if >=0 */
-  u8 suppressErr;               /* Do not issue error messages if true */
-  u8 vtabOnConflict;            /* Value to return for s3_vtab_on_conflict() */
-  u8 isTransactionSavepoint;    /* True if the outermost savepoint is a TS */
-  u8 mTrace;                    /* zero or more SQLITE_TRACE flags */
-  u8 noSharedCache;             /* True if no shared-cache backends */
-  u8 nSqlExec;                  /* Number of pending OP_SqlExec opcodes */
-  u8 eOpenState;                /* Current condition of the connection */
+  sqlite3_vfs *pVfs;            /* OS Interface - 虚拟文件系统接口指针 */
+  struct Vdbe *pVdbe;           /* List of active virtual machines - 活动虚拟机链表头 */
+  CollSeq *pDfltColl;           /* BINARY collseq for the database encoding - 数据库编码的二进制排序序列 */
+  sqlite3_mutex *mutex;         /* Connection mutex - 连接互斥锁，用于线程安全 */
+  Db *aDb;                      /* All backends - 所有数据库后端数组（main、temp及附加数据库） */
+  int nDb;                      /* Number of backends currently in use - 当前使用的数据库后端数量 */
+  u32 mDbFlags;                 /* flags recording internal state - 记录内部状态的标志位 */
+  u64 flags;                    /* flags settable by pragmas. See below - 可通过 PRAGMA 设置的标志位 */
+  i64 lastRowid;                /* ROWID of most recent insert (see above) - 最近插入操作的 ROWID */
+  i64 szMmap;                   /* Default mmap_size setting - 默认内存映射大小设置 */
+  u32 nSchemaLock;              /* Do not reset the schema when non-zero - 非零时不重置架构 */
+  unsigned int openFlags;       /* Flags passed to sqlite3_vfs.xOpen() - 传递给 VFS 打开函数的标志 */
+  int errCode;                  /* Most recent error code (SQLITE_*) - 最近的错误代码 */
+  int errByteOffset;            /* Byte offset of error in SQL statement - SQL 语句中错误的字节偏移量 */
+  int errMask;                  /* & result codes with this before returning - 返回前与结果码进行与操作的掩码 */
+  int iSysErrno;                /* Errno value from last system error - 上次系统错误的 errno 值 */
+  u32 dbOptFlags;               /* Flags to enable/disable optimizations - 启用/禁用优化的标志位 */
+  u8 enc;                       /* Text encoding - 文本编码（UTF-8、UTF-16le、UTF-16be） */
+  u8 autoCommit;                /* The auto-commit flag. - 自动提交标志位 */
+  u8 temp_store;                /* 1: file 2: memory 0: default - 临时表存储位置（1=文件，2=内存，0=默认） */
+  u8 mallocFailed;              /* True if we have seen a malloc failure - 如果发生内存分配失败则为真 */
+  u8 bBenignMalloc;             /* Do not require OOMs if true - 为真时不要求内存不足错误 */
+  u8 dfltLockMode;              /* Default locking-mode for attached dbs - 附加数据库的默认锁定模式 */
+  signed char nextAutovac;      /* Autovac setting after VACUUM if >=0 - VACUUM 后的自动清理设置（>=0时有效） */
+  u8 suppressErr;               /* Do not issue error messages if true - 为真时不发出错误消息 */
+  u8 vtabOnConflict;            /* Value to return for s3_vtab_on_conflict() - 虚拟表冲突处理函数的返回值 */
+  u8 isTransactionSavepoint;    /* True if the outermost savepoint is a TS - 如果最外层保存点是事务保存点则为真 */
+  u8 mTrace;                    /* zero or more SQLITE_TRACE flags - 零个或多个 SQLITE_TRACE 跟踪标志 */
+  u8 noSharedCache;             /* True if no shared-cache backends - 如果没有共享缓存后端则为真 */
+  u8 nSqlExec;                  /* Number of pending OP_SqlExec opcodes - 待处理的 OP_SqlExec 操作码数量 */
+  u8 eOpenState;                /* Current condition of the connection - 连接的当前状态 */
   int nextPagesize;             /* Pagesize after VACUUM if >0 */
   i64 nChange;                  /* Value returned by sqlite3_changes() */
   i64 nTotalChange;             /* Value returned by sqlite3_total_changes() */

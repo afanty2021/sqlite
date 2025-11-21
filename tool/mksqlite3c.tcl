@@ -21,6 +21,99 @@
 #
 # The amalgamated SQLite code will be written into sqlite3.c
 #
+# SQLite Amalgamation 生成脚本
+#
+# 此脚本用于构建包含所有 SQLite 核心组件的单一大型源文件。
+#（至少是核心组件 - 测试工具、shell 和 TCL 接口被省略。）
+#
+# Amalgamation 生成流程：
+#
+# 1. 准备阶段：
+#    首先执行：make target_source
+#    上述 make 目标将所有源代码文件移动到名为 "tsrc" 的子目录中
+#    此脚本期望在该目录中找到文件，如果找不到则无法工作
+#
+# 2. 代码文件收集：
+#    - 核心源文件：*.c、*.h 文件
+#    - 生成的代码文件：
+#      * parse.c 和 parse.h：通过 lemon 从 parse.y 生成的解析器代码
+#      * keywordhash.h：由 mkkeywordhash 程序生成的关键字哈希表
+#      * opcodes.h：虚拟机操作码定义
+#      * 其他自动生成的头文件和源文件
+#
+# 3. 执行脚本：
+#    tclsh mksqlite3c.tcl [flags] [额外源文件]
+#    生成的合并 SQLite 代码将写入 sqlite3.c
+#
+# Amalgamation 技术优势：
+#
+# 1. 编译优化：
+#    - 将所有代码合并为单一翻译单元
+#    - 允许编译器进行跨文件优化
+#    - 通常可以提升 5% 或更多的性能
+#    - 支持内联和常量传播等优化
+#
+# 2. 部署简化：
+#    - 只需要两个文件：sqlite3.c 和 sqlite3.h
+#    - 简化构建系统和依赖管理
+#    - 便于集成到其他项目中
+#    - 减少编译时间和复杂度
+#
+# 3. 版本管理：
+#    - 所有代码在单一文件中，版本管理更简单
+#    - 便于分发和部署
+#    - 支持静态链接和嵌入式使用
+#
+# 4. 技术特性：
+#    - 保持所有原有功能和 API
+#    - 支持所有 SQLite 编译选项
+#    - 保留调试信息和测试代码（可选）
+#    - 兼容所有目标平台和编译器
+#
+# 命令行选项：
+#
+# --nostatic        => 不生成可编译时修改的链接
+# --linemacros=?     => 是否在输出中包含 #line 指令 (? = 1 或 0)
+# --useapicall      => 为函数添加 SQLITE_APICALL 或 SQLITE_CDECL 前缀
+# --srcdir $SRC     => 指定包含组成源文件的目录
+# --enable-recover  => 启用恢复功能，生成 sqlite3r.c 而非 sqlite3.c
+# --help            => 显示帮助信息
+#
+# 默认选项：
+# --linemacros=1 和 '--srcdir tsrc'
+#
+# 使用示例：
+# ```bash
+# # 基本用法
+# tclsh mksqlite3c.tcl
+#
+# # 启用额外功能
+# tclsh mksqlite3c.tcl --enable-recover
+#
+# # 自定义源目录
+# tclsh mksqlite3c.tcl --srcdir ./src
+#
+# # 添加额外源文件
+# tclsh mksqlite3c.tcl extra1.c extra2.c
+# ```
+#
+# 输出文件：
+# - sqlite3.c：标准的 amalgamation 源文件
+# - sqlite3r.c：启用了恢复功能的版本（当使用 --enable-recover 时）
+#
+# 技术实现细节：
+# - 使用 Tcl 脚本语言实现
+# - 处理 #include 依赖关系
+# - 管理条件编译指令
+# - 生成适当的 #line 指令
+# - 处理字符串和注释转义
+#
+# 注意事项：
+# - 生成的文件很大（通常超过 5MB）
+# - 编译时需要足够的内存
+# - 某些调试工具可能难以处理大文件
+# - 建议在开发时使用分离的源文件，发布时使用 amalgamation
+#
 
 set help {Usage: tclsh mksqlite3c.tcl <options>
  where <options> is zero or more of the following with these effects:

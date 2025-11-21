@@ -13,6 +13,51 @@
 ** implement the programmer interface to the library.  Routines in
 ** other files are for internal use by SQLite and should not be
 ** accessed by users of the library.
+**
+** SQLite 库主文件
+**
+** 本文件包含 SQLite 库的主要例程。此文件中的例程实现了库的程序员接口。
+** 其他文件中的例程仅供 SQLite 内部使用，不应被库的用户直接访问。
+**
+** main.c 在 SQLite 架构中的地位：
+**
+** 1. 公共 API 实现：
+**    - 实现了大部分 sqlite3_* 公共接口函数
+**    - 作为应用程序与 SQLite 核心的桥梁
+**    - 提供数据库连接管理、语句执行、结果处理等核心功能
+**
+** 2. 扩展管理：
+**    - 负责内置扩展的注册和初始化
+**    - 管理 FTS3/5、RTREE、ICU 等扩展模块
+**    - 提供扩展加载和卸载的统一接口
+**
+** 3. 初始化和清理：
+**    - 实现 SQLite 库的全局初始化
+**    - 管理内存分配器、线程子系统、日志系统
+**    - 提供库版本信息和功能查询接口
+**
+** 4. 错误处理：
+**    - 统一的错误码管理和错误消息处理
+**    - 异常情况下的资源清理和状态恢复
+**    - 调试和诊断信息的输出控制
+**
+** 5. 与内部模块的协调：
+**    - 调用 VDBE、B-Tree、Pager 等内部模块
+**    - 协调解析器、优化器、执行器的协作
+**    - 管理事务生命周期和并发控制
+**
+** 设计原则：
+** - 接口稳定性：保证公共 API 的向后兼容性
+** - 错误安全：完善的错误处理和资源清理机制
+** - 线程安全：在多线程环境下的安全使用
+** - 性能优化：关键路径的高效实现
+**
+** 主要功能模块：
+** - 连接管理：sqlite3_open(), sqlite3_close()
+** - 语句处理：sqlite3_prepare(), sqlite3_step(), sqlite3_finalize()
+** - 扩展系统：sqlite3_load_extension(), 自动扩展注册
+** - 配置管理：sqlite3_config(), sqlite3_limit()
+** - 工具函数：sqlite3_libversion(), sqlite3_sourceid(), sqlite3_threadsafe()
 */
 #include "sqliteInt.h"
 
@@ -53,35 +98,95 @@ int SQLITE_EXTRA_AUTOEXT(sqlite3*);
 /*
 ** An array of pointers to extension initializer functions for
 ** built-in extensions.
+**
+** 内置扩展初始化函数指针数组
+**
+** 此数组包含了所有编译时启用的 SQLite 内置扩展的初始化函数指针。
+** 当创建新的数据库连接时，SQLite 会自动调用这些函数来注册相应的扩展。
+**
+** 内置扩展类型和功能：
+**
+** 1. 全文搜索扩展：
+**    - FTS3 (sqlite3Fts3Init)：传统的全文搜索引擎
+**    - FTS5 (sqlite3Fts5Init)：新一代高性能全文搜索引擎
+**    * 特点：支持中文分词、相关性排名、查询优化
+**    * 应用：文档检索、内容搜索、日志分析
+**
+** 2. 空间索引扩展：
+**    - RTREE (sqlite3RtreeInit)：基于 R-Tree 算法的空间索引
+**    * 特点：支持多维空间数据、范围查询、邻近查询
+**    * 应用：地理信息系统、空间数据查询、位置服务
+**
+** 3. 国际化扩展：
+**    - ICU (sqlite3IcuInit)：Unicode 国际化组件支持
+**    * 特点：Unicode 处理、国际排序规则、文本转换
+**    * 应用：多语言应用、国际化排序、文本规范化
+**
+** 4. 调试和诊断虚拟表：
+**    - DBPAGE (sqlite3DbpageRegister)：数据库页面访问虚拟表
+**      * 允许直接访问数据库的原始页面数据
+**      * 用于调试、数据库修复、内部结构分析
+**
+**    - DBSTAT (sqlite3DbstatRegister)：数据库统计信息虚拟表
+**      * 提供表大小、页面使用情况等统计信息
+**      * 用于性能分析、空间使用优化
+**
+**    - STMTVTAB (sqlite3StmtVtabInit)：语句诊断虚拟表
+**      * 提供已准备语句的执行统计和诊断信息
+**      * 用于查询性能分析和优化
+**
+**    - BYTECODE_VTAB (sqlite3VdbeBytecodeVtabInit)：字节码分析虚拟表
+**      * 允许检查和分析 VDBE 字节码
+**      * 用于查询计划分析和调试
+**
+** 5. 测试扩展：
+**    - TestExt (sqlite3TestExtInit)：测试框架扩展
+**      * 提供测试和故障模拟功能
+**      * 主要用于 SQLite 内部测试
+**
+** 6. 自定义扩展：
+**    - EXTRA_AUTOEXT：用户定义的自动扩展
+**      * 允许用户添加自定义扩展
+**      * 通过 SQLITE_EXTRA_AUTOEXT 宏配置
+**
+** 初始化顺序：
+** - 扩展按照数组中的顺序依次初始化
+** - 初始化失败不会影响其他扩展的加载
+** - 每个扩展都注册自己的虚拟表和函数
+**
+** 条件编译：
+** - 所有扩展都通过宏条件控制是否包含
+** - 可以根据需要启用或禁用特定扩展
+** - 支持自定义的扩展组合配置
 */
 static int (*const sqlite3BuiltinExtensions[])(sqlite3*) = {
 #ifdef SQLITE_ENABLE_FTS3
-  sqlite3Fts3Init,
+  sqlite3Fts3Init,           /* FTS3 全文搜索扩展初始化 */
 #endif
 #ifdef SQLITE_ENABLE_FTS5
-  sqlite3Fts5Init,
+  sqlite3Fts5Init,           /* FTS5 全文搜索扩展初始化 */
 #endif
 #if defined(SQLITE_ENABLE_ICU) || defined(SQLITE_ENABLE_ICU_COLLATIONS)
-  sqlite3IcuInit,
+  sqlite3IcuInit,            /* ICU 国际化扩展初始化 */
 #endif
 #ifdef SQLITE_ENABLE_RTREE
-  sqlite3RtreeInit,
+  sqlite3RtreeInit,          /* RTREE 空间索引扩展初始化 */
 #endif
 #ifdef SQLITE_ENABLE_DBPAGE_VTAB
-  sqlite3DbpageRegister,
+  sqlite3DbpageRegister,     /* DBPAGE 数据库页面虚拟表注册 */
 #endif
 #ifdef SQLITE_ENABLE_DBSTAT_VTAB
-  sqlite3DbstatRegister,
+  sqlite3DbstatRegister,     /* DBSTAT 数据库统计虚拟表注册 */
 #endif
-  sqlite3TestExtInit,
+  sqlite3TestExtInit,        /* 测试扩展初始化 */
 #ifdef SQLITE_ENABLE_STMTVTAB
-  sqlite3StmtVtabInit,
+  sqlite3StmtVtabInit,       /* STMTVTAB 语句诊断虚拟表初始化 */
 #endif
 #ifdef SQLITE_ENABLE_BYTECODE_VTAB
-  sqlite3VdbeBytecodeVtabInit,
+  sqlite3VdbeBytecodeVtabInit, /* BYTECODE_VTAB 字节码分析虚拟表初始化 */
 #endif
 #ifdef SQLITE_EXTRA_AUTOEXT
-  SQLITE_EXTRA_AUTOEXT,
+  SQLITE_EXTRA_AUTOEXT,      /* 用户自定义扩展 */
 #endif
 };
 

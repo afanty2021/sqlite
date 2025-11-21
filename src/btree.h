@@ -12,43 +12,144 @@
 ** This header file defines the interface that the sqlite B-Tree file
 ** subsystem.  See comments in the source code for a detailed description
 ** of what each interface routine does.
+**
+** SQLite B-Tree 存储引擎接口头文件
+**
+** 本文件定义了 SQLite B-Tree 文件子系统的接口。B-Tree 是 SQLite 的核心存储引擎，
+** 负责管理数据库文件的页式存储结构，包括表的 B+Tree 索引和索引的 B-Tree 结构。
+**
+** 主要功能：
+** 1. B-Tree 数据库文件的打开、关闭和配置管理
+** 2. 事务控制：开始、提交、回滚和保存点操作
+** 3. 表和索引的创建、删除和管理
+** 4. 游标操作：数据的插入、查询、更新和删除
+** 5. 页面管理：缓存、锁定和并发控制
+** 6. 自动清理和空间回收机制
+**
+** 设计特点：
+** - 页式存储：固定大小的页面（通常 4KB）作为基本 I/O 单位
+** - B+Tree 结构：叶子节点包含实际数据，内部节点用于索引
+** - 事务 ACID：通过回滚日志和 WAL 模式保证事务特性
+** - 并发控制：多粒度锁定机制支持多用户并发访问
+** - 崩溃恢复：重做日志和检查点机制保证数据一致性
+**
+** 使用说明：
+** - 本接口是 SQLite 存储层的核心抽象，供上层 VDBE 调用
+** - 应用程序通常不直接使用这些接口，而是通过标准 SQL API
+** - 理解 B-Tree 接口有助于深入分析 SQLite 的存储和性能特性
 */
 #ifndef SQLITE_BTREE_H
 #define SQLITE_BTREE_H
 
 /* TODO: This definition is just included so other modules compile. It
 ** needs to be revisited.
+**
+** TODO：此定义仅为了让其他模块能够编译而包含，需要重新审查。
 */
-#define SQLITE_N_BTREE_META 16
+#define SQLITE_N_BTREE_META 16         /* B-Tree 元数据页面中的字段数量 */
 
 /*
 ** If defined as non-zero, auto-vacuum is enabled by default. Otherwise
 ** it must be turned on for each database using "PRAGMA auto_vacuum = 1".
+**
+** 如果定义为非零值，默认启用自动清理。否则必须对每个数据库使用
+** "PRAGMA auto_vacuum = 1" 来启用。
+**
+** 自动清理（Auto-Vacuum）功能：
+** - 当删除大量数据时，自动收缩数据库文件大小
+** - FULL 模式：每次事务后自动清理，但会增加事务开销
+** - INCR 模式：增量清理，需要手动执行 VACUUM 命令
+** - NONE 模式：不自动清理，文件大小可能增长但不会收缩
 */
 #ifndef SQLITE_DEFAULT_AUTOVACUUM
-  #define SQLITE_DEFAULT_AUTOVACUUM 0
+  #define SQLITE_DEFAULT_AUTOVACUUM 0  /* 默认不启用自动清理 */
 #endif
 
-#define BTREE_AUTOVACUUM_NONE 0        /* Do not do auto-vacuum */
-#define BTREE_AUTOVACUUM_FULL 1        /* Do full auto-vacuum */
-#define BTREE_AUTOVACUUM_INCR 2        /* Incremental vacuum */
+/* B-Tree 自动清理模式定义 */
+#define BTREE_AUTOVACUUM_NONE 0        /* Do not do auto-vacuum - 不执行自动清理 */
+#define BTREE_AUTOVACUUM_FULL 1        /* Do full auto-vacuum - 执行完整自动清理 */
+#define BTREE_AUTOVACUUM_INCR 2        /* Incremental vacuum - 增量清理模式 */
 
 /*
 ** Forward declarations of structure
+**
+** 结构体前向声明 - 定义 B-Tree 子系统的核心数据结构
+**
+** 这些是 B-Tree 存储引擎的主要数据结构：
+**
+** Btree: 表示一个打开的 B-Tree 数据库连接
+**        - 包含数据库文件引用、配置信息和事务状态
+**        - 每个数据库连接可以包含多个 B-Tree 实例（main、temp、附加数据库）
+**
+** BtCursor: B-Tree 游标，用于在 B-Tree 中导航和操作数据
+**           - 指向 B-Tree 中的特定位置（表或索引中的某行）
+**           - 支持插入、查询、更新、删除操作
+**           - 维护游标状态和缓存信息
+**
+** BtShared: 共享的 B-Tree 信息，支持多个连接共享同一个数据库文件
+**           - 包含页面缓存、锁管理器和 Schema 信息
+**           - 实现连接间的数据共享和并发控制
+**           - 管理数据库文件的物理结构
+**
+** BtreePayload: B-Tree 负载数据结构
+**              - 表示要存储在 B-Tree 节点中的数据
+**              - 包含键值对、数据长度和实际内容
+**              - 用于插入和更新操作时的数据传递
 */
-typedef struct Btree Btree;
-typedef struct BtCursor BtCursor;
-typedef struct BtShared BtShared;
-typedef struct BtreePayload BtreePayload;
+typedef struct Btree Btree;              /* B-Tree 数据库连接结构 */
+typedef struct BtCursor BtCursor;        /* B-Tree 游标结构 */
+typedef struct BtShared BtShared;        /* 共享 B-Tree 信息结构 */
+typedef struct BtreePayload BtreePayload; /* B-Tree 负载数据结构 */
 
 
+/*
+** 打开 B-Tree 数据库连接
+**
+** 此函数创建一个新的 B-Tree 数据库连接，用于访问 SQLite 数据库文件。
+** 这是 SQLite 存储引擎的入口点，建立了从内存结构到磁盘文件的桥梁。
+**
+** 参数说明：
+**
+** pVfs: 要使用的虚拟文件系统接口
+**      - 定义文件 I/O、路径操作、线程同步等系统调用抽象
+**      - 支持加密、压缩等文件系统扩展功能
+**      - 通常使用 sqlite3_vfs_find() 获取默认 VFS
+**
+** zFilename: 要打开的数据库文件名
+**           - 对于内存数据库使用 ":memory:"
+**           - 对于临时数据库使用 "" 或 NULL
+**           - 可以包含相对路径或绝对路径
+**           - 支持 UTF-8 编码的文件名
+**
+** db: 关联的数据库连接
+**    - 指向包含此 B-Tree 的 sqlite3 连接结构
+**    - 用于错误报告和内存分配
+**    - 共享连接配置和状态信息
+**
+** ppBtree: 返回打开的 Btree* 指针的地址
+**         - 成功时指向新创建的 Btree 结构
+**         - 失败时保持不变，调用者应检查返回值
+**         - 后续 B-Tree 操作都使用此指针
+**
+** flags: B-Tree 操作标志位（可以是以下值的按位或）：
+**       - BTREE_OMIT_JOURNAL: 不创建或使用回滚日志
+**       - BTREE_MEMORY: 内存数据库，不访问磁盘
+**       - BTREE_SINGLE: 文件最多包含一个 B-Tree
+**       - BTREE_UNORDERED: 可以使用哈希实现
+**
+** vfsFlags: 传递给 VFS 打开函数的标志
+**          - 包含文件打开模式、共享模式等
+**          - 由 B-Tree 模块根据 flags 参数计算得出
+**
+** 返回值：SQLITE_OK 表示成功，其他值表示错误代码
+*/
 int sqlite3BtreeOpen(
-  sqlite3_vfs *pVfs,       /* VFS to use with this b-tree */
-  const char *zFilename,   /* Name of database file to open */
-  sqlite3 *db,             /* Associated database connection */
-  Btree **ppBtree,         /* Return open Btree* here */
-  int flags,               /* Flags */
-  int vfsFlags             /* Flags passed through to VFS open */
+  sqlite3_vfs *pVfs,       /* VFS to use with this b-tree - 虚拟文件系统接口 */
+  const char *zFilename,   /* Name of database file to open - 数据库文件名 */
+  sqlite3 *db,             /* Associated database connection - 关联的数据库连接 */
+  Btree **ppBtree,         /* Return open Btree* here - 返回的 Btree 指针 */
+  int flags,               /* Flags - B-Tree 操作标志 */
+  int vfsFlags             /* Flags passed through to VFS open - VFS 打开标志 */
 );
 
 /* The flags parameter to sqlite3BtreeOpen can be the bitwise or of the

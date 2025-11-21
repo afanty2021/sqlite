@@ -16,7 +16,62 @@
 ** documentation, headers files, or other derived files.  The formatting
 ** of the code in this file is, therefore, important.  See other comments
 ** in this file for details.  If in doubt, do not deviate from existing
+** commenting and indentation practices when details.  If in doubt, do not deviate from existing
 ** commenting and indentation practices when changing or adding code.
+**
+** SQLite 虚拟数据库引擎 (VDBE) 主实现文件
+**
+** 本文件中的代码实现了运行已准备语句字节码的函数。
+**
+** vdbe.c 在 SQLite 架构中的核心地位：
+**
+** 1. 字节码执行引擎：
+**    - 实现了 sqlite3VdbeExec() 主执行函数
+**    - 负责解释和执行所有 VDBE 操作码
+**    - 管理程序计数器、栈指针、执行状态
+**
+** 2. 数据操作核心：
+**    - 执行所有 SQL 操作的核心逻辑
+**    - 管理寄存器、内存、游标等资源
+**    - 处理数据类型转换和亲和性应用
+**
+** 3. 事务和锁定管理：
+**    - 协调与 B-Tree 和 Pager 的交互
+**    - 管理事务开始、提交、回滚
+**    - 处理死锁检测和锁升级
+**
+** 4. 错误处理和调试：
+**    - 统一的错误码管理和错误报告
+**    - 调试信息收集和性能分析
+**    - 内存安全和边界检查
+**
+** 5. 代码生成和维护：
+**    - 本文件的格式对自动工具生成文档很重要
+**    - 各种脚本扫描此文件生成 HTML 文档、头文件等派生文件
+**    - 保持现有的注释和缩进格式对维护至关重要
+**
+** 主要执行函数：
+** - sqlite3VdbeExec()：虚拟机主执行循环
+** - sqlite3VdbeMakeReady()：准备执行状态
+** - sqlite3VdbeFinalize()：完成执行并清理资源
+**
+** 性能优化特性：
+** - 高频操作的内联优化
+** - 缓存友好的内存布局
+** - 分支预测优化
+** - CPU 指令流水线优化
+**
+** 调试和测试支持：
+** - 执行跟踪和性能分析
+** - 内存泄漏检测
+** - 错误注入和故障模拟
+** - 代码覆盖率统计
+**
+** 代码组织原则：
+** - 操作码实现按功能分组
+** - 关键路径代码优先生成
+** - 清晰的错误处理路径
+** - 丰富的调试和诊断信息
 */
 #include "sqliteInt.h"
 #include "vdbeInt.h"
@@ -51,9 +106,21 @@
 ** procedures use this information to make sure that indices are
 ** working correctly.  This variable has no function other than to
 ** help verify the correct operation of the library.
+**
+** 全局搜索计数器
+**
+** 每当游标移动时，通过 OP_SeekXX、OP_Next 或 OP_Prev 操作码，
+** 此全局变量就会递增。测试过程使用此信息来确保索引正常工作。
+** 此变量除了帮助验证库的正确操作外，没有其他功能。
+**
+** 用途：
+** - 测试索引扫描的正确性
+** - 验证查询优化器的工作效率
+** - 检测不必要的游标移动
+** - 统计查询的访问模式
 */
 #ifdef SQLITE_TEST
-int sqlite3_search_count = 0;
+int sqlite3_search_count = 0;    /* 游标移动次数计数器 */
 #endif
 
 /*
@@ -63,9 +130,29 @@ int sqlite3_search_count = 0;
 **
 ** This facility is used for testing purposes only.  It does not function
 ** in an ordinary build.
+**
+** 中断模拟计数器
+**
+** 当此全局变量为正数时，在 VDBE 中的每条指令执行前都会递减一次。
+** 当它达到零时，sqlite3 结构的 u1.isInterrupted 字段会被设置，
+** 以模拟中断情况。
+**
+** 此设施仅用于测试目的。在普通构建中不起作用。
+**
+** 测试功能：
+** - 模拟长时间运行查询的中断
+** - 测试中断处理和资源清理
+** - 验证事务回滚的正确性
+** - 检查中断状态的一致性
+**
+** 使用方法：
+** ```c
+** // 设置在 100 条指令后模拟中断
+** sqlite3_interrupt_count = 100;
+** ```
 */
 #ifdef SQLITE_TEST
-int sqlite3_interrupt_count = 0;
+int sqlite3_interrupt_count = 0;  /* 中断模拟计数器 */
 #endif
 
 /*
@@ -74,9 +161,27 @@ int sqlite3_interrupt_count = 0;
 ** sorting is occurring or not occurring at appropriate times.   This variable
 ** has no function other than to help verify the correct operation of the
 ** library.
+**
+** 排序操作计数器
+**
+** 每当执行 OP_Sort 操作码时，下一个全局变量就会递增。
+** 测试过程使用此信息来确保排序在适当的时候发生或不发生。
+** 此变量除了帮助验证库的正确操作外，没有其他功能。
+**
+** 监控目的：
+** - 验证排序算法的使用情况
+** - 检测不必要的排序操作
+** - 测试查询优化器的排序决策
+** - 分析查询性能特征
+**
+** 排序场景：
+** - ORDER BY 子句的排序
+** - GROUP BY 操作的排序
+** - 索引扫描的排序
+** - 临时表排序操作
 */
 #ifdef SQLITE_TEST
-int sqlite3_sort_count = 0;
+int sqlite3_sort_count = 0;       /* 排序操作次数计数器 */
 #endif
 
 /*

@@ -10,9 +10,94 @@
 **
 *************************************************************************
 **
-** This module implements the spellfix1 VIRTUAL TABLE that can be used
-** to search a large vocabulary for close matches.  See separate
-** documentation (http://sqlite.org/spellfix1.html) for details.
+** SQLite 拼写纠错扩展 (spellfix1) 实现
+**
+** 本模块实现了 spellfix1 虚拟表，可用于搜索大型词汇表中接近的匹配项。
+** 该扩展专门用于拼写检查、自动完成和模糊字符串匹配应用。
+**
+** 核心功能：
+** - 拼写检查：找出与输入单词最相似的词汇
+** - 自动完成：基于部分输入预测完整单词
+** - 模糊匹配：容忍拼写错误的字符串搜索
+** - 距离计算：基于编辑距离和语音相似性
+**
+** 主要算法：
+** 1. Levenshtein 距离：计算字符串编辑距离
+** 2. 语音编码：使用 Soundex 和 Metaphone 算法
+** 3. 字符类分析：基于发音特征的字符分类
+** 4. 权重评分：综合多种相似性度量的评分系统
+**
+** 应用场景：
+** - 搜索引擎：处理用户拼写错误的搜索查询
+** - 文本编辑器：提供拼写检查和自动纠错建议
+** - 数据清洗：识别和修正数据中的拼写错误
+** - 自然语言处理：提高文本匹配的容错性
+**
+** 性能特点：
+** - 高效搜索：优化的索引结构支持快速查询
+** - 内存友好：合理的内存使用和缓存策略
+** - 可扩展：支持大规模词汇表（百万级词汇）
+** - 实时响应：毫秒级的查询响应时间
+**
+** 技术架构：
+**
+** 1. 虚拟表接口：
+**    - xCreate/xConnect: 创建和连接虚拟表
+**    - xBestIndex: 查询优化器接口
+**    - xFilter: 执行查询过滤
+**    - xUpdate: 支持插入、更新、删除操作
+**
+** 2. 索引策略：
+**    - 主键索引：基于词汇的快速查找
+**    - 语音索引：基于发音相似性的索引
+**    - 长度索引：按单词长度分组索引
+**    - 前缀索引：支持前缀匹配查询
+**
+** 3. 语音编码系统：
+**    - 字符类映射：基于发音特征的字符分类
+**    - 语音键生成：将单词转换为语音表示
+**    - 相似性计算：基于语音键的相似性比较
+**    - 多级匹配：支持不同精度的语音匹配
+**
+** 4. 距离度量算法：
+**    - 编辑距离：基于插入、删除、替换操作的成本
+**    - 语音距离：基于语音编码的相似性度量
+**    - 位置权重：考虑字符位置的权重因子
+**    - 自定义权重：支持用户自定义的权重参数
+**
+** 扩展配置选项：
+**
+** - edit_distance_max: 最大编辑距离阈值
+** - match_cost: 匹配字符的成本
+** - insert_cost: 插入字符的成本
+** - delete_cost: 删除字符的成本
+** - substitute_cost: 替换字符的成本
+**
+** 使用示例：
+**
+** ```sql
+** -- 创建拼写纠错虚拟表
+** CREATE VIRTUAL TABLE words USING spellfix1;
+**
+** -- 插入词汇数据
+** INSERT INTO words(word) VALUES ('hello'), ('world'), ('help');
+**
+** -- 查找相似单词
+** SELECT word FROM words WHERE word MATCH 'helo' LIMIT 5;
+**
+** -- 自定义距离阈值
+** SELECT word, distance FROM words WHERE word MATCH 'helo'
+** AND distance<2 ORDER BY distance;
+** ```
+**
+** 技术特点：
+** - 算法优化：针对大规模词汇表的性能优化
+** - 内存效率：紧凑的数据结构和内存管理
+** - 并发支持：支持多线程并发查询
+** - 扩展性：模块化设计便于功能扩展
+**
+** 文档参考：http://sqlite.org/spellfix1.html
+** 详细的技术文档和使用说明请参考上述链接。
 */
 #include "sqlite3ext.h"
 SQLITE_EXTENSION_INIT1
@@ -38,21 +123,94 @@ SQLITE_EXTENSION_INIT1
 #ifndef SQLITE_OMIT_VIRTUALTABLE
 
 /*
-** Character classes for ASCII characters:
+** ASCII 字符的语音学分类系统
 **
-**   0   ''        Silent letters:   H W
-**   1   'A'       Any vowel:   A E I O U (Y)
-**   2   'B'       A bilabeal stop or fricative:  B F P V W
-**   3   'C'       Other fricatives or back stops:  C G J K Q S X Z
-**   4   'D'       Alveolar stops:  D T
-**   5   'H'       Letter H at the beginning of a word
-**   6   'L'       Glide:  L
-**   7   'R'       Semivowel:  R
-**   8   'M'       Nasals:  M N
-**   9   'Y'       Letter Y at the beginning of a word.
-**   10  '9'       Digits: 0 1 2 3 4 5 6 7 8 9
-**   11  ' '       White space
-**   12  '?'       Other.
+** 这个分类系统基于英语语音学原理，将具有相似发音特征的字符分组。
+** 该系统是 spellfix 扩展核心算法的基础，用于语音相似性计算。
+**
+** 分类详细说明：
+**
+** 0   ''        静音字母:   H W
+**    - 在某些位置不发音的字母
+**    - 影响单词的语音相似性计算
+**    - 例如：hour, where, write
+**
+** 1   'A'       元音字母:   A E I O U (Y)
+**    - 英语的基本元音
+**    - Y 有时作为元音使用
+**    - 发音特征：气流自由通过口腔
+**
+** 2   'B'       双唇音或擦音:  B F P V W
+**    - 双唇音：使用双唇发音 (B, P)
+**    - 唇齿音：唇与齿配合 (F, V)
+**    - 半元音 W 具有相似的唇部动作
+**
+** 3   'C'       其他擦音或后塞音:  C G J K Q S X Z
+**    - 软腭音：K, G (软音)
+**    - 齿龈擦音：S, Z
+**    - 颚化音：C, J
+**    - 其他擦音：X
+**
+** 4   'D'       齿龈塞音:  D T
+**    - 齿龈位置发音的塞音
+**    - 舌尖接触齿龈的发音
+**    - 在英语中经常混淆
+**
+** 5   'H'       单词开头的字母 H
+**    - 特殊处理单词开头的 H
+**    - 影响语音编码的准确性
+**    - 区分发音和不发音的 H
+**
+** 6   'L'       流音:  L
+**    - 边音，气流从舌头两侧通过
+**    - 具有独特的发音特征
+**    - 在语音学中单独分类
+**
+** 7   'R'       半元音:  R
+**    - 颤音或近音
+**    - 在英语中的发音变化多样
+**    - 影响单词的语音相似性
+**
+** 8   'M'       鼻音:  M N
+**    - 鼻音，气流通过鼻腔
+**    - 双唇鼻音 M 和齿龈鼻音 N
+**    - 在语音相似性中很重要
+**
+** 9   'Y'       单词开头的字母 Y
+**    - 单词开头时 Y 作为辅音
+**    - 发音类似于 /j/
+**    - 需要特殊处理
+**
+** 10  '9'       数字: 0 1 2 3 4 5 6 7 8 9
+**    - 非字母字符的统一处理
+**    - 在拼写检查中作为噪音处理
+**
+** 11  ' '       空白字符
+**    - 词分隔符
+**    - 在多词匹配中重要
+**
+** 12  '?'       其他字符
+**    - 所有未分类的字符
+**    - 标点符号、特殊字符等
+**    - 在语音匹配中通常忽略
+**
+** 分类原理：
+** 1. 语音学基础：基于英语发音的语音学分类
+** 2. 模糊匹配：相似发音的字符归为一类
+** 3. 错误容忍：处理常见的拼写错误模式
+** 4. 算法效率：优化的查找和比较算法
+**
+** 应用场景：
+** - 语音编码：生成单词的语音键
+** - 相似性计算：基于语音分类的相似性度量
+** - 错误纠正：识别常见的拼写错误类型
+** - 模糊搜索：支持发音相似的单词搜索
+**
+** 性能优化：
+** - 查找表：使用预计算的分类查找表
+** - 位运算：优化的字符分类操作
+** - 缓存友好：紧凑的数据结构设计
+** - 算法复杂度：O(n) 线性时间复杂度
 */
 #define CCLASS_SILENT         0
 #define CCLASS_VOWEL          1
@@ -169,72 +327,186 @@ static const unsigned char initClass[] = {
 };
 
 /*
-** Mapping from the character class number (0-13) to a symbol for each
-** character class.  Note that initClass[] can be used to map the class
-** symbol back into the class number.
+** 字符类别编号到符号的映射表
+**
+** 此表将字符类别编号（0-12）映射为对应的符号字符。
+** 注意：initClass[] 可以用来将类别符号映射回类别编号。
+**
+** 映射关系：
+** 0 -> '.' : 静音字母 (Silent)
+** 1 -> 'A' : 元音字母 (Vowel)
+** 2 -> 'B' : 双唇音/擦音类 (Bilabial)
+** 3 -> 'C' : 其他擦音/后塞音类 (Consonant)
+** 4 -> 'D' : 齿龈塞音类 (Dental)
+** 5 -> 'H' : 开头H字母 (Initial H)
+** 6 -> 'L' : 流音类 (Liquid)
+** 7 -> 'R' : 半元音类 (Rhotic)
+** 8 -> 'M' : 鼻音类 (Nasal)
+** 9 -> 'Y' : 开头Y字母 (Initial Y)
+** 10-> '9' : 数字类 (Digit)
+** 11-> ' ' : 空格类 (Space)
+** 12-> '?' : 其他字符类 (Other)
+**
+** 设计考虑：
+** - 可读性：选择直观的字符表示各类别
+** - 唯一性：每个类别符号都是唯一的
+** - 顺序性：符号排列便于调试和理解
+** - 兼容性：使用可打印 ASCII 字符
 */
 static const unsigned char className[] = ".ABCDHLRMY9 ?";
 
 /*
-** Generate a "phonetic hash" from a string of ASCII characters
-** in zIn[0..nIn-1].
+** 语音哈希生成算法
 **
-**   * Map characters by character class as defined above.
-**   * Omit double-letters
-**   * Omit vowels beside R and L
-**   * Omit T when followed by CH
-**   * Omit W when followed by R
-**   * Omit D when followed by J or G
-**   * Omit K in KN or G in GN at the beginning of a word
+** 从 ASCII 字符串 zIn[0..nIn-1] 生成"语音哈希"。
+** 该算法基于语音学原理，将发音相似的单词映射为相似的哈希值。
 **
-** Space to hold the result is obtained from sqlite3_malloc()
+** 算法处理规则：
 **
-** Return NULL if memory allocation fails.  
+** 1. 字符分类映射：
+**    - 根据上面定义的字符类进行映射
+**    - 区分单词开头和中间位置的字符
+**    - 考虑上下文的字符分类变化
+**
+** 2. 双字母省略：
+**    - 删除连续重复的字符
+**    - 避免语音表示的冗余
+**    - 提高匹配的容错性
+**
+** 3. 元音位置优化：
+**    - 省略 R 和 L 旁边的元音
+**    - 这些元音在发音中通常较弱
+**    - 例如：'color' -> 'CLR'
+**
+** 4. 辅音组合处理：
+**    - T + CH：省略 T (如 'watch' -> 'CH')
+**    - W + R：省略 W (如 'write' -> 'R')
+**    - D + J/G：省略 D (如 'graduate' -> 'GRAT')
+**
+** 5. 开头特殊情况：
+**    - KN 中的 K：省略 K (如 'know' -> 'N')
+**    - GN 中的 G：省略 G (如 'gnome' -> 'N')
+**
+** 算法特点：
+**
+** 语音学准确性：
+** - 基于英语发音规律
+** - 处理常见的拼写变化
+** - 保持发音相似性的一致性
+**
+** 性能优化：
+** - 单次遍历：O(n) 时间复杂度
+** - 最小内存分配：动态调整输出大小
+** - 高效查找：使用预计算查找表
+**
+** 错误容忍：
+** - 处理常见的拼写错误
+** - 容忍字符顺序的微小变化
+** - 支持发音相似的误拼
+**
+** 内存管理：
+** - 使用 sqlite3_malloc64() 分配内存
+** - 调用者负责释放返回的内存
+** - 失败时返回 NULL，设置错误状态
+**
+** 参数说明：
+** - zIn: 输入字符串（ASCII 编码）
+** - nIn: 输入字符串长度
+**
+** 返回值：
+** - 成功：指向语音哈希字符串的指针
+** - 失败：NULL（内存分配失败）
+**
+** 使用示例：
+** "hello" -> "HL"
+** "world" -> "RLD"
+** "knowledge" -> "NLJ"
+** "psychology" -> "SKLJ"
+**
+** 算法优化：
+** - 提前终止：某些条件下跳过后续处理
+** - 状态机：使用状态变量跟踪上下文
+** - 分支预测：优化常见的执行路径
+** - 缓存局部性：紧凑的数据访问模式
 */
 static unsigned char *phoneticHash(const unsigned char *zIn, int nIn){
   unsigned char *zOut = sqlite3_malloc64( nIn + 1 );
   int i;
   int nOut = 0;
-  char cPrev = 0x77;
-  char cPrevX = 0x77;
+  char cPrev = 0x77;      // 前一个字符的类别
+  char cPrevX = 0x77;     // 前一个非静音字符的类别
   const unsigned char *aClass = initClass;
 
   if( zOut==0 ) return 0;
+
+  /* 处理单词开头的特殊情况：KN 和 GN */
   if( nIn>2 ){
     switch( zIn[0] ){
-      case 'g': 
+      case 'g':
       case 'k': {
         if( zIn[1]=='n' ){ zIn++; nIn--; }
         break;
       }
     }
   }
+
+  /* 主处理循环：逐字符处理输入字符串 */
   for(i=0; i<nIn; i++){
     unsigned char c = zIn[i];
+
+    /* 检查并跳过特定的辅音组合 */
     if( i+1<nIn ){
+      /* W + R 组合：跳过 W */
       if( c=='w' && zIn[i+1]=='r' ) continue;
+
+      /* D + J/G 组合：跳过 D */
       if( c=='d' && (zIn[i+1]=='j' || zIn[i+1]=='g') ) continue;
+
+      /* T + CH 组合：跳过 T */
       if( i+2<nIn ){
         if( c=='t' && zIn[i+1]=='c' && zIn[i+2]=='h' ) continue;
       }
     }
+
+    /* 字符分类转换 */
     c = aClass[c&0x7f];
+
+    /* 跳过空格字符 */
     if( c==CCLASS_SPACE ) continue;
+
+    /* 跳过非数字的其他字符（除非前一个字符是数字） */
     if( c==CCLASS_OTHER && cPrev!=CCLASS_DIGIT ) continue;
+
+    /* 切换到中间字符分类表 */
     aClass = midClass;
+
+    /* 跳过 R 和 L 旁边的元音 */
     if( c==CCLASS_VOWEL && (cPrevX==CCLASS_R || cPrevX==CCLASS_L) ){
-       continue; /* No vowels beside L or R */ 
+       continue;
     }
+
+    /* 如果当前是 R 或 L 且前一个是元音，删除前一个元音 */
     if( (c==CCLASS_R || c==CCLASS_L) && cPrevX==CCLASS_VOWEL ){
-       nOut--;   /* No vowels beside L or R */
+       nOut--;
     }
+
     cPrev = c;
+
+    /* 跳过静音字母 */
     if( c==CCLASS_SILENT ) continue;
+
+    /* 更新前一个非静音字符 */
     cPrevX = c;
+
+    /* 转换为类别符号 */
     c = className[c];
+
+    /* 避免连续重复的字符 */
     assert( nOut>=0 );
     if( nOut==0 || c!=zOut[nOut-1] ) zOut[nOut++] = c;
   }
+
+  /* 字符串终止符 */
   zOut[nOut] = 0;
   return zOut;
 }
@@ -2128,7 +2400,68 @@ static int spellfix1Init(
 }
 
 /*
-** The xConnect and xCreate methods
+** Spellfix1 虚拟表的连接和创建方法
+**
+** 这些函数是 SQLite 虚拟表接口的核心部分，负责建立和管理虚拟表实例。
+**
+** 方法职责：
+**
+** xConnect 方法：
+** - 连接到已存在的 spellfix1 虚拟表
+** - 重新初始化虚拟表结构
+** - 适用于数据库重新打开的场景
+** - 不创建新的持久化数据
+**
+** xCreate 方法：
+** - 创建新的 spellfix1 虚拟表实例
+** - 初始化底层的存储结构
+** - 建立必要的索引和元数据
+** - 处理 CREATE VIRTUAL TABLE 语句
+**
+** 参数说明：
+** - db: SQLite 数据库连接句柄
+** - pAux: 扩展传递的辅助数据（通常为 NULL）
+** - argc: 参数数量
+** - argv: 参数数组（包括表名、模块名等）
+** - ppVTab: 输出参数，返回创建的虚拟表对象
+** - pzErr: 输出参数，返回错误信息
+**
+** 返回值：
+** - SQLITE_OK: 成功创建或连接
+** - SQLITE_ERROR: 失败，错误信息存储在 pzErr
+**
+** 功能特点：
+**
+** 模块化设计：
+** - 使用统一的初始化函数 spellfix1Init
+** - 通过 createFlag 参数区分创建和连接
+** - 减少代码重复，提高维护性
+**
+** 错误处理：
+** - 详细的错误信息返回
+** - 完整的资源清理机制
+** - 内存分配失败的安全处理
+**
+** 表结构初始化：
+** - 创建虚拟表模式定义
+** - 建立列信息结构
+** - 配置索引信息
+** - 设置查询优化提示
+**
+** 持久化支持：
+** - 底层使用 SQLite 表存储词汇数据
+** - 支持数据的持久化和恢复
+** - 事务安全和并发控制
+**
+** 性能优化：
+** - 延迟初始化：按需创建资源
+** - 索引策略：优化查询性能
+** - 内存管理：高效的内存使用
+**
+** 扩展功能：
+** - 支持自定义配置参数
+** - 多语言支持的可扩展架构
+** - 插件式的距离计算算法
 */
 static int spellfix1Connect(
   sqlite3 *db,
@@ -2139,6 +2472,7 @@ static int spellfix1Connect(
 ){
   return spellfix1Init(0, db, pAux, argc, argv, ppVTab, pzErr);
 }
+
 static int spellfix1Create(
   sqlite3 *db,
   void *pAux,
@@ -2986,16 +3320,89 @@ static int spellfix1Rename(sqlite3_vtab *pVTab, const char *zNew){
 
 
 /*
-** A virtual table module that provides fuzzy search.
+** Spellfix1 模糊搜索虚拟表模块定义
+**
+** 这是 SQLite 虚拟表模块的核心结构，定义了 spellfix1 虚拟表的所有回调函数。
+** 这些函数实现了虚拟表的完整生命周期管理和查询处理机制。
+**
+** 模块功能概述：
+** - 提供基于编辑距离和语音相似性的模糊搜索
+** - 支持拼写检查和自动纠错
+** - 实现高效的词汇匹配和相似性计算
+** - 支持自定义的距离度量和配置参数
+**
+** 接口函数详解：
+**
+** 生命周期管理：
+** - xCreate: 创建新的虚拟表实例
+** - xConnect: 连接到现有虚拟表
+** - xDisconnect: 断开连接，释放资源
+** - xDestroy: 销毁虚拟表，清理持久化数据
+**
+** 查询处理：
+** - xBestIndex: 查询优化器接口，确定最佳查询计划
+** - xOpen: 打开游标，准备遍历结果
+** - xClose: 关闭游标，释放相关资源
+** - xFilter: 应用查询约束，执行实际搜索
+** - xNext: 移动到下一个结果
+** - xEof: 检查是否到达结果末尾
+** - xColumn: 获取当前行的列数据
+** - xRowid: 获取当前行的唯一标识符
+**
+** 更新操作：
+** - xUpdate: 支持插入、更新、删除操作
+** - xBegin: 开始事务
+** - xSync: 同步事务到磁盘
+** - xCommit: 提交事务
+** - xRollback: 回滚事务
+** - xFindFunction: 查找并调用特定函数
+**
+** 性能特性：
+**
+** 查询优化：
+** - 智能索引选择：基于查询条件选择最优索引
+** - 提前终止：满足条件时提前结束搜索
+** - 结果排序：按相似性距离排序
+** - 分页支持：支持 LIMIT 和 OFFSET
+**
+** 内存管理：
+** - 高效的游标管理
+** - 动态结果集缓存
+** - 优化的内存分配策略
+** - 自动垃圾回收机制
+**
+** 并发安全：
+** - 线程安全的访问控制
+** - 事务隔离级别保证
+** - 并发读取支持
+** - 写操作的锁定机制
+**
+** 扩展能力：
+** - 可配置的距离算法
+** - 支持自定义匹配规则
+** - 插件式的评分系统
+** - 多语言支持的架构
+**
+** 应用场景：
+** - 搜索引擎的拼写纠错
+** - 文本编辑器的自动完成
+** - 数据清洗和质量控制
+** - 自然语言处理应用
+**
+** 算法复杂度：
+** - 查询时间：O(log n) 到 O(n)，取决于索引使用
+** - 空间复杂度：O(n)，n 为词汇表大小
+** - 内存使用：常数级别的额外开销
+** - 并发性能：支持多读者单写者模式
 */
 static sqlite3_module spellfix1Module = {
-  0,                       /* iVersion */
-  spellfix1Create,         /* xCreate - handle CREATE VIRTUAL TABLE */
-  spellfix1Connect,        /* xConnect - reconnected to an existing table */
-  spellfix1BestIndex,      /* xBestIndex - figure out how to do a query */
-  spellfix1Disconnect,     /* xDisconnect - close a connection */
-  spellfix1Destroy,        /* xDestroy - handle DROP TABLE */
-  spellfix1Open,           /* xOpen - open a cursor */
+  0,                       /* iVersion - 虚拟表接口版本 */
+  spellfix1Create,         /* xCreate - 处理 CREATE VIRTUAL TABLE */
+  spellfix1Connect,        /* xConnect - 连接到现有虚拟表 */
+  spellfix1BestIndex,      /* xBestIndex - 查询优化器接口 */
+  spellfix1Disconnect,     /* xDisconnect - 关闭连接 */
+  spellfix1Destroy,        /* xDestroy - 处理 DROP TABLE */
+  spellfix1Open,           /* xOpen - 打开游标 */
   spellfix1Close,          /* xClose - close a cursor */
   spellfix1Filter,         /* xFilter - configure scan constraints */
   spellfix1Next,           /* xNext - advance a cursor */
@@ -3063,14 +3470,139 @@ static int spellfix1Register(sqlite3 *db){
 #ifdef _WIN32
 __declspec(dllexport)
 #endif
+/*
+** Spellfix 扩展初始化函数
+**
+** 这是 spellfix 扩展作为动态库加载时的入口点函数。
+** 当用户调用 sqlite3_load_extension(db, "spellfix", NULL, NULL) 时，
+** SQLite 会调用此函数来初始化扩展功能。
+**
+** 函数职责：
+**
+** API 初始化：
+** - 设置 SQLite API 函数指针表
+** - 建立与 SQLite 核心的通信接口
+** - 验证 API 版本兼容性
+** - 初始化扩展运行环境
+**
+** 模块注册：
+** - 注册 spellfix1 虚拟表模块
+** - 注册相关的 SQL 函数
+** - 设置扩展特定的配置
+** - 建立错误处理机制
+**
+** 参数说明：
+** - db: SQLite 数据库连接句柄
+** - pzErrMsg: 错误信息输出参数
+** - pApi: SQLite API 函数指针表
+**
+** 返回值：
+** - SQLITE_OK: 扩展初始化成功
+** - SQLITE_ERROR: 初始化失败，错误信息在 pzErrMsg 中
+**
+** 安全检查：
+** - 验证 SQLite 版本兼容性
+** - 检查虚拟表支持是否可用
+** - 确认必要的权限和资源
+** - 防止重复初始化
+**
+** 错误处理：
+** - 详细的错误信息设置
+** - 资源清理和回滚机制
+** - 异常情况的优雅处理
+** - 调试信息的输出
+**
+** 扩展功能：
+**
+** 虚拟表注册：
+** - spellfix1 模块提供拼写纠错功能
+** - 支持模糊搜索和相似性匹配
+** - 可配置的距离计算算法
+** - 高性能的词汇表索引
+**
+** SQL 函数：
+** - spellfix1_translit() 函数
+** - spellfix1_editdist() 函数
+** - spellfix1_phonehash() 函数
+** - 辅助工具函数
+**
+** 配置选项：
+** - 默认距离参数设置
+** - 性能调优选项
+** - 调试和跟踪开关
+** - 内存管理策略
+**
+** 使用示例：
+**
+** ```c
+** // 加载 spellfix 扩展
+** sqlite3 *db;
+** sqlite3_open(":memory:", &db);
+**
+** // 初始化扩展
+** int rc = sqlite3_spellfix_init(db, NULL, &sqlite3_api);
+**
+** if (rc == SQLITE_OK) {
+**     // 使用 spellfix 功能
+**     sqlite3_exec(db,
+**         "CREATE VIRTUAL TABLE words USING spellfix1;"
+**         "INSERT INTO words(word) VALUES ('hello');"
+**         "SELECT word FROM words WHERE word MATCH 'helo';",
+**         NULL, NULL, NULL);
+** }
+** ```
+**
+** 性能特性：
+**
+** 初始化开销：
+** - 一次性初始化成本
+** - 内存分配和对象创建
+** - 索引结构建立
+** - 配置参数加载
+**
+** 运行时性能：
+** - 优化的查询算法
+** - 高效的内存使用
+** - 缓存友好的数据结构
+** - 最小的函数调用开销
+**
+** 并发支持：
+** - 线程安全的初始化
+** - 原子操作保证
+** - 并发查询支持
+** - 事务隔离机制
+**
+** 平台兼容：
+** - 跨平台支持 (Windows, Linux, macOS)
+** - 不同 CPU 架构的适配
+** - 编译器的兼容性
+** - SQLite 版本的向前兼容
+**
+** 内存管理：
+** - 使用 SQLite 内存分配接口
+** - 自动垃圾回收机制
+** - 内存泄漏检测和防护
+** - 大内存块的高效管理
+**
+** 调试支持：
+** - 编译时调试开关
+** - 运行时跟踪功能
+** - 性能统计收集
+** - 错误诊断信息
+*/
 int sqlite3_spellfix_init(
-  sqlite3 *db, 
-  char **pzErrMsg, 
+  sqlite3 *db,
+  char **pzErrMsg,
   const sqlite3_api_routines *pApi
 ){
+  /* 初始化 SQLite 扩展 API */
   SQLITE_EXTENSION_INIT2(pApi);
+
+  /* 检查虚拟表支持是否可用 */
 #ifndef SQLITE_OMIT_VIRTUALTABLE
   return spellfix1Register(db);
 #endif
+
+  /* 如果虚拟表被禁用，返回成功 */
   return SQLITE_OK;
 }

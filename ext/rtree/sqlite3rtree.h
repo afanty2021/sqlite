@@ -14,13 +14,67 @@
 #ifndef _SQLITE3RTREE_H_
 #define _SQLITE3RTREE_H_
 
+/*
+** SQLite R-Tree 扩展公共接口头文件
+**
+** 本头文件定义了 SQLite R-Tree 空间索引扩展的公共 API 接口。
+** R-Tree 是一种基于 R-Tree 算法的空间数据结构，专门用于高效地
+** 存储和查询多维空间数据。
+**
+** R-Tree 扩展核心特性：
+**
+** 1. 空间索引结构：
+**    - 基于 R-Tree 算法的层次化空间索引
+**    - 支持 1-5 维空间数据存储
+**    - 最小边界矩形 (MBR) 索引技术
+**    - 动态插入、删除和更新操作
+**
+** 2. 查询功能：
+**    - 包含查询 (Contains)：完全包含在指定区域内的对象
+**    - 相交查询 (Intersects)：与指定区域相交的对象
+**    - 邻近查询 (Within)：在指定距离内的对象
+**    - 自定义几何查询：用户定义的空间查询函数
+**
+** 3. 性能优化：
+**    - 空间局部性优化
+**    - 批量操作支持
+**    - 查询计划优化
+**    - 内存和磁盘混合存储
+**
+** 4. 应用场景：
+**    - 地理信息系统 (GIS)
+**    - 位置服务和导航
+**    - 空间数据分析
+**    - 计算机图形学
+**    - 科学可视化
+**
+** 使用示例：
+** ```sql
+** -- 创建 2D 空间索引表
+** CREATE VIRTUAL TABLE boundaries USING rtree(
+**   id,              -- 整数主键
+**   minX, maxX,      -- X 坐标范围
+**   minY, maxY       -- Y 坐标范围
+** );
+**
+** -- 插入空间数据
+** INSERT INTO boundaries VALUES(1, -100, 100, -50, 50);
+**
+** -- 空间查询
+** SELECT * FROM boundaries
+** WHERE minX>=-80 AND maxX<=80 AND minY>=-30 AND maxY<=30;
+** ```
+*/
+
 #include <sqlite3.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* R-Tree 几何回调结构体 - 前向声明 */
 typedef struct sqlite3_rtree_geometry sqlite3_rtree_geometry;
+/* R-Tree 查询信息结构体 - 前向声明 */
 typedef struct sqlite3_rtree_query_info sqlite3_rtree_query_info;
 
 /* The double-precision datatype used by RTree depends on the
